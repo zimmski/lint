@@ -11,10 +11,13 @@ import (
 	"flag"
 	"fmt"
 	"go/build"
-	"io/ioutil"
+	"go/parser"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"golang.org/x/tools/go/loader"
 
 	"github.com/golang/lint"
 )
@@ -35,26 +38,65 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
+	cfg := &loader.Config{
+		AllowErrors: true,
+		ParserMode:  parser.ParseComments,
+	}
+
 	switch flag.NArg() {
 	case 0:
-		lintDir(".")
+		addDir(cfg, ".")
 	case 1:
 		arg := flag.Arg(0)
 		if strings.HasSuffix(arg, "/...") && isDir(arg[:len(arg)-4]) {
 			for _, dirname := range allPackagesInFS(arg) {
-				lintDir(dirname)
+				addDir(cfg, dirname)
 			}
 		} else if isDir(arg) {
-			lintDir(arg)
+			addDir(cfg, arg)
 		} else if exists(arg) {
-			lintFiles(arg)
+			err := cfg.CreateFromFilenames(".", arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
 		} else {
-			for _, pkgname := range importPaths([]string{arg}) {
-				lintPackage(pkgname)
+			err := cfg.ImportWithTests(arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
 			}
 		}
 	default:
-		lintFiles(flag.Args()...)
+		err := cfg.CreateFromFilenames(".", flag.Args()...)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}
+
+	program, err := cfg.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+
+	l := new(lint.Linter)
+	var ps []lint.Problem
+
+	for _, pkg := range program.Created {
+		pp, err := l.LintFiles(pkg.Files)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			continue
+		}
+
+		ps = append(ps, pp...)
+	}
+
+	sort.Sort(lint.ByPosition(ps))
+
+	for _, p := range ps {
+		if p.Confidence >= *minConfidence {
+			fmt.Printf("%v: %s\n", p.Position, p.Text)
+		}
 	}
 }
 
@@ -68,41 +110,9 @@ func exists(filename string) bool {
 	return err == nil
 }
 
-func lintFiles(filenames ...string) {
-	files := make(map[string][]byte)
-	for _, filename := range filenames {
-		src, err := ioutil.ReadFile(filename)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			continue
-		}
-		files[filename] = src
-	}
-
-	l := new(lint.Linter)
-	ps, err := l.LintFiles(files)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return
-	}
-	for _, p := range ps {
-		if p.Confidence >= *minConfidence {
-			fmt.Printf("%v: %s\n", p.Position, p.Text)
-		}
-	}
-}
-
-func lintDir(dirname string) {
+func addDir(cfg *loader.Config, dirname string) {
+	// go/loader does currently not expose ImportDir
 	pkg, err := build.ImportDir(dirname, 0)
-	lintImportedPackage(pkg, err)
-}
-
-func lintPackage(pkgname string) {
-	pkg, err := build.Import(pkgname, ".", 0)
-	lintImportedPackage(pkg, err)
-}
-
-func lintImportedPackage(pkg *build.Package, err error) {
 	if err != nil {
 		if _, nogo := err.(*build.NoGoError); nogo {
 			// Don't complain if the failure is due to no Go source files.
@@ -115,12 +125,28 @@ func lintImportedPackage(pkg *build.Package, err error) {
 	var files []string
 	files = append(files, pkg.GoFiles...)
 	files = append(files, pkg.TestGoFiles...)
-	if pkg.Dir != "." {
-		for i, f := range files {
-			files[i] = filepath.Join(pkg.Dir, f)
+
+	joinDirWithFilenames(dirname, files)
+
+	err = cfg.CreateFromFilenames(".", files...)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+
+	if files := pkg.XTestGoFiles; len(files) != 0 {
+		joinDirWithFilenames(dirname, files)
+
+		err = cfg.CreateFromFilenames(".", files...)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 		}
 	}
-	// TODO(dsymonds): Do foo_test too (pkg.XTestGoFiles)
+}
 
-	lintFiles(files...)
+func joinDirWithFilenames(dir string, files []string) {
+	if dir != "." {
+		for i, f := range files {
+			files[i] = filepath.Join(dir, f)
+		}
+	}
 }

@@ -15,7 +15,6 @@ import (
 	"go/printer"
 	"go/token"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -48,12 +47,12 @@ func (p *Problem) String() string {
 	return p.Text
 }
 
-type byPosition []Problem
+type ByPosition []Problem
 
-func (p byPosition) Len() int      { return len(p) }
-func (p byPosition) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+func (p ByPosition) Len() int      { return len(p) }
+func (p ByPosition) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
-func (p byPosition) Less(i, j int) bool {
+func (p ByPosition) Less(i, j int) bool {
 	pi, pj := p[i].Position, p[j].Position
 
 	if pi.Filename != pj.Filename {
@@ -70,44 +69,47 @@ func (p byPosition) Less(i, j int) bool {
 }
 
 // Lint lints src.
-func (l *Linter) Lint(filename string, src []byte) ([]Problem, error) {
-	return l.LintFiles(map[string][]byte{filename: src})
+func (l *Linter) LintSrc(filename string, src []byte) ([]Problem, error) {
+	pkg := newPackage()
+
+	err := pkg.parseFile(filename, src)
+	if err != nil {
+		return nil, err
+	}
+
+	return pkg.lint(), nil
 }
 
-// LintFiles lints a set of files of a single package.
-// The argument is a map of filename to source.
-func (l *Linter) LintFiles(files map[string][]byte) ([]Problem, error) {
+// LintFilenames lints a set of files of a single package.
+// The argument is a map of filenames.
+func (l *Linter) LintFilenames(files []string) ([]Problem, error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
-	pkg := &pkg{
-		fset:  token.NewFileSet(),
-		files: make(map[string]*file),
-	}
-	var pkgName string
-	for filename, src := range files {
-		f, err := parser.ParseFile(pkg.fset, filename, src, parser.ParseComments)
+	pkg := newPackage()
+
+	for _, filename := range files {
+		err := pkg.parseFile(filename, nil)
 		if err != nil {
 			return nil, err
-		}
-		if pkgName == "" {
-			pkgName = f.Name.Name
-		} else if f.Name.Name != pkgName {
-			return nil, fmt.Errorf("%s is in package %s, not %s", filename, f.Name.Name, pkgName)
-		}
-		pkg.files[filename] = &file{
-			pkg:      pkg,
-			f:        f,
-			fset:     pkg.fset,
-			src:      src,
-			filename: filename,
 		}
 	}
 	return pkg.lint(), nil
 }
 
+// LintFiles lints a set of files of a single package.
+// The argument is a map of AST files.
+func (l *Linter) LintFiles(files []*ast.File) ([]Problem, error) {
+	for _, f := range files {
+		fmt.Println("TODO", f)
+	}
+
+	return nil, nil
+}
+
 // pkg represents a package being linted.
 type pkg struct {
+	name  string
 	fset  *token.FileSet
 	files map[string]*file
 
@@ -120,6 +122,13 @@ type pkg struct {
 	main bool
 
 	problems []Problem
+}
+
+func newPackage() *pkg {
+	return &pkg{
+		fset:  token.NewFileSet(),
+		files: make(map[string]*file),
+	}
 }
 
 func (p *pkg) lint() []Problem {
@@ -149,9 +158,30 @@ func (p *pkg) lint() []Problem {
 		f.lint()
 	}
 
-	sort.Sort(byPosition(p.problems))
-
 	return p.problems
+}
+
+func (p *pkg) parseFile(filename string, src []byte) error {
+	f, err := parser.ParseFile(p.fset, filename, src, parser.ParseComments)
+	if err != nil {
+		return err
+	}
+
+	if p.name == "" {
+		p.name = f.Name.Name
+	} else if f.Name.Name != p.name {
+		return fmt.Errorf("%s is in package %s, not %s", filename, f.Name.Name, p.name)
+	}
+
+	p.files[filename] = &file{
+		pkg:      p,
+		f:        f,
+		fset:     p.fset,
+		src:      src,
+		filename: filename,
+	}
+
+	return nil
 }
 
 // file represents a file being linted.
